@@ -51,11 +51,11 @@ function parseMxGraphModel(xml) {
       continue;
     }
 
-    // Parse geometry
+    // Parse geometry. draw.io omits x / y when they are 0, so default them.
     const geo = c.mxGeometry;
     const geometry = geo ? {
-      x: geo.x != null ? Number(geo.x) : undefined,
-      y: geo.y != null ? Number(geo.y) : undefined,
+      x: geo.x != null ? Number(geo.x) : 0,
+      y: geo.y != null ? Number(geo.y) : 0,
       width: geo.width != null ? Number(geo.width) : undefined,
       height: geo.height != null ? Number(geo.height) : undefined,
       relative: geo.relative === "1",
@@ -65,8 +65,19 @@ function parseMxGraphModel(xml) {
     let points;
     if (geo?.Array?.mxPoint) {
       const pts = Array.isArray(geo.Array.mxPoint) ? geo.Array.mxPoint : [geo.Array.mxPoint];
-      points = pts.map((p) => ({ x: Number(p.x), y: Number(p.y) }));
+      points = pts.map(toPoint);
     }
+
+    // Named points: sourcePoint / targetPoint hold the free end of an edge that
+    // is not attached to a cell; offset shifts a label from its anchor.
+    const named = {};
+    if (geo?.mxPoint) {
+      const pts = Array.isArray(geo.mxPoint) ? geo.mxPoint : [geo.mxPoint];
+      for (const p of pts) {
+        if (p.as) named[p.as] = toPoint(p);
+      }
+    }
+    if (geometry && named.offset) geometry.offset = named.offset;
 
     // Parse style into key-value pairs
     const styleProps = {};
@@ -90,6 +101,10 @@ function parseMxGraphModel(xml) {
         style: styleProps,
         source: c.source,
         target: c.target,
+        // Only reported for an end not attached to a cell; draw.io keeps a
+        // stale point on attached ends, which it ignores when rendering.
+        source_point: c.source ? undefined : named.sourcePoint,
+        target_point: c.target ? undefined : named.targetPoint,
         points,
       });
     } else if (c.vertex === "1") {
@@ -108,11 +123,17 @@ function parseMxGraphModel(xml) {
   return { shapes, edges, layers };
 }
 
+/** Convert a parsed mxPoint (attributes omitted when 0) to numbers. */
+function toPoint(p) {
+  return { x: p.x != null ? Number(p.x) : 0, y: p.y != null ? Number(p.y) : 0 };
+}
+
 export const readDrawioTool = {
   name: "read_drawio",
   description:
     "Reads and parses a .drawio or .xml diagram file, returning structured JSON with all shapes, " +
     "edges, and their properties (labels, positions, styles, connections). " +
+    "An edge end not attached to a shape is given as source_point / target_point. " +
     "Use this to analyze existing diagrams, extract component lists, or understand diagram structure " +
     "before making modifications. Supports both uncompressed mxGraphModel XML and .drawio file format.",
   inputSchema: {
@@ -130,7 +151,8 @@ export const readDrawioTool = {
       include_geometry: {
         type: "boolean",
         description:
-          "Include position and size for each shape. Default: true",
+          "Include position and size for each shape, and waypoints and free end " +
+          "points for each edge. Default: true",
       },
     },
     required: ["file_path"],
@@ -164,7 +186,11 @@ export const readDrawioTool = {
     }
     if (!include_geometry) {
       for (const s of result.shapes) delete s.geometry;
-      for (const e of result.edges) delete e.points;
+      for (const e of result.edges) {
+        delete e.points;
+        delete e.source_point;
+        delete e.target_point;
+      }
     }
 
     return {
